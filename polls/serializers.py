@@ -110,7 +110,19 @@ class PollCreateSerializer(serializers.ModelSerializer):
     def create(self, validated_data):
         """Create poll with options."""
         options_data = validated_data.pop('options')
-        validated_data['creator'] = self.context['request'].user
+        
+        # Set creator to anonymous user if not authenticated
+        request = self.context['request']
+        if request.user.is_authenticated:
+            validated_data['creator'] = request.user
+        else:
+            # Create or get anonymous user for polls
+            anonymous_user, created = User.objects.get_or_create(
+                username='anonymous',
+                defaults={'email': '', 'first_name': '', 'last_name': ''}
+            )
+            validated_data['creator'] = anonymous_user
+        
         poll = Poll.objects.create(**validated_data)
         
         # Create poll options
