@@ -6,6 +6,7 @@ from rest_framework import generics, status, permissions
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
+from rest_framework.authtoken.models import Token
 from django.shortcuts import get_object_or_404
 from django.db.models import Q, Count, Prefetch
 from django.utils import timezone
@@ -16,45 +17,52 @@ from drf_spectacular.types import OpenApiTypes
 from .models import Poll, PollOption, Vote, PollResult
 from .serializers import (
     PollListSerializer, PollDetailSerializer, PollCreateSerializer,
-    VoteSerializer, PollResultSerializer, UserSerializer
+    VoteSerializer, PollResultSerializer, UserSerializer,
+    UserRegistrationSerializer, UserLoginSerializer, TokenSerializer
 )
 
 
 class PollListView(generics.ListCreateAPIView):
     """
     List all polls or create a new poll.
-    
+
     GET: Retrieve a paginated list of polls with basic information.
     POST: Create a new poll (requires authentication).
     """
     permission_classes = [AllowAny]
-    
+
     def get_serializer_class(self):
         if self.request.method == 'POST':
             return PollCreateSerializer
         return PollListSerializer
-    
+
+    def get_serializer_context(self):
+        """Add request to serializer context."""
+        context = super().get_serializer_context()
+        context['request'] = self.request
+        return context
+
     def get_queryset(self):
         """Filter polls based on query parameters."""
         queryset = Poll.objects.select_related('creator').prefetch_related('options')
-        
+
         # Filter by active status
         is_active = self.request.query_params.get('is_active')
         if is_active is not None:
             queryset = queryset.filter(is_active=is_active.lower() == 'true')
-        
+
         # Filter by creator
         creator = self.request.query_params.get('creator')
         if creator:
             queryset = queryset.filter(creator__username__icontains=creator)
-        
+
         # Filter by search term
         search = self.request.query_params.get('search')
         if search:
             queryset = queryset.filter(
                 Q(title__icontains=search) | Q(description__icontains=search)
             )
-        
+
         # Filter by date range
         date_from = self.request.query_params.get('date_from')
         date_to = self.request.query_params.get('date_to')
@@ -62,9 +70,9 @@ class PollListView(generics.ListCreateAPIView):
             queryset = queryset.filter(created_at__gte=date_from)
         if date_to:
             queryset = queryset.filter(created_at__lte=date_to)
-        
+
         return queryset.order_by('-created_at')
-    
+
     @extend_schema(
         summary="List polls",
         description="Retrieve a paginated list of polls with filtering options.",
@@ -103,7 +111,7 @@ class PollListView(generics.ListCreateAPIView):
     )
     def get(self, request, *args, **kwargs):
         return super().get(request, *args, **kwargs)
-    
+
     @extend_schema(
         summary="Create poll",
         description="Create a new poll with multiple options.",
@@ -132,60 +140,97 @@ class PollListView(generics.ListCreateAPIView):
 class PollDetailView(generics.RetrieveUpdateDestroyAPIView):
     """
     Retrieve, update or delete a poll.
-    
+
     GET: Retrieve detailed poll information with options and results.
     PUT/PATCH: Update poll (only by creator).
     DELETE: Delete poll (only by creator).
     """
-    permission_classes = [AllowAny]
-    
+    permission_classes = [AllowAny]  # We'll handle auth in individual methods
+    lookup_field = 'poll_id'  # Use poll_id instead of pk
+
     def get_serializer_class(self):
         if self.request.method in ['PUT', 'PATCH']:
             return PollCreateSerializer
         return PollDetailSerializer
-    
+
+    def get_serializer_context(self):
+        """Add request to serializer context."""
+        context = super().get_serializer_context()
+        context['request'] = self.request
+        return context
+
     def get_queryset(self):
         return Poll.objects.select_related('creator').prefetch_related('options')
-    
-    def get_permissions(self):
-        """Set permissions based on action."""
-        if self.request.method in ['PUT', 'PATCH', 'DELETE']:
-            return [IsAuthenticated()]
-        return [AllowAny()]
-    
+
+    def get_object(self):
+        """Get the poll object using poll_id from URL."""
+        poll_id = self.kwargs.get('poll_id')
+        return get_object_or_404(Poll, id=poll_id)
+
+    def get(self, request, *args, **kwargs):
+        """Allow anyone to view poll details."""
+        return super().get(request, *args, **kwargs)
+
+    def put(self, request, *args, **kwargs):
+        """Update poll - requires authentication."""
+        if not request.user.is_authenticated:
+            return Response(
+                {'detail': 'Authentication credentials were not provided.'},
+                status=status.HTTP_401_UNAUTHORIZED
+            )
+        return super().put(request, *args, **kwargs)
+
+    def patch(self, request, *args, **kwargs):
+        """Partially update poll - requires authentication."""
+        if not request.user.is_authenticated:
+            return Response(
+                {'detail': 'Authentication credentials were not provided.'},
+                status=status.HTTP_401_UNAUTHORIZED
+            )
+        return super().patch(request, *args, **kwargs)
+
+    def delete(self, request, *args, **kwargs):
+        """Delete poll - requires authentication."""
+        if not request.user.is_authenticated:
+            return Response(
+                {'detail': 'Authentication credentials were not provided.'},
+                status=status.HTTP_401_UNAUTHORIZED
+            )
+        return super().delete(request, *args, **kwargs)
+
     def perform_update(self, serializer):
         """Ensure only the creator can update the poll."""
         if serializer.instance.creator != self.request.user:
             raise PermissionError("You can only update polls you created.")
         serializer.save()
-    
+
     def perform_destroy(self, instance):
         """Ensure only the creator can delete the poll."""
         if instance.creator != self.request.user:
             raise PermissionError("You can only delete polls you created.")
         instance.delete()
-    
+
     @extend_schema(
         summary="Get poll details",
         description="Retrieve detailed information about a specific poll including options and voting status."
     )
     def get(self, request, *args, **kwargs):
         return super().get(request, *args, **kwargs)
-    
+
     @extend_schema(
         summary="Update poll",
         description="Update poll details (only by creator)."
     )
     def put(self, request, *args, **kwargs):
         return super().put(request, *args, **kwargs)
-    
+
     @extend_schema(
         summary="Partially update poll",
         description="Partially update poll details (only by creator)."
     )
     def patch(self, request, *args, **kwargs):
         return super().patch(request, *args, **kwargs)
-    
+
     @extend_schema(
         summary="Delete poll",
         description="Delete a poll (only by creator)."
@@ -209,30 +254,45 @@ class PollDetailView(generics.RetrieveUpdateDestroyAPIView):
 def cast_vote(request, poll_id):
     """
     Cast a vote for a poll option.
-    
+
     Supports both authenticated and anonymous voting.
     Prevents duplicate votes unless poll allows multiple votes.
     """
     poll = get_object_or_404(Poll, id=poll_id)
-    
+
     serializer = VoteSerializer(
         data=request.data,
         context={'poll': poll, 'request': request}
     )
-    
+
     if serializer.is_valid():
         vote = serializer.save()
-        
-        # Update cached results asynchronously
-        update_poll_results_async.delay(poll_id)
-        
+
+        # Update cached results asynchronously (with fallback)
+        try:
+            update_poll_results_async.delay(poll_id)
+        except Exception as e:
+            # If Celery/Redis is not available, update results synchronously
+            print(f"Celery task failed, updating results synchronously: {e}")
+            try:
+                # Update cached results synchronously
+                cache_key = f"poll_results_{poll_id}"
+                results = generate_poll_results(poll)
+                cache.set(cache_key, results, timeout=300)
+
+                # Update or create PollResult record
+                poll_result, created = PollResult.objects.get_or_create(poll=poll)
+                poll_result.update_results()
+            except Exception as sync_error:
+                print(f"Failed to update results synchronously: {sync_error}")
+
         return Response({
             'message': 'Vote cast successfully',
             'vote_id': vote.id,
             'option_id': vote.option.id,
             'option_text': vote.option.text
         }, status=status.HTTP_201_CREATED)
-    
+
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
@@ -249,20 +309,20 @@ def cast_vote(request, poll_id):
 def poll_results(request, poll_id):
     """
     Get real-time poll results.
-    
+
     Returns cached results for performance, with vote counts and percentages.
     """
     poll = get_object_or_404(Poll, id=poll_id)
-    
+
     # Try to get cached results first
     cache_key = f"poll_results_{poll_id}"
     results = cache.get(cache_key)
-    
+
     if not results:
         # Generate results if not cached
         results = generate_poll_results(poll)
         cache.set(cache_key, results, timeout=300)  # Cache for 5 minutes
-    
+
     return Response(results, status=status.HTTP_200_OK)
 
 
@@ -270,7 +330,7 @@ def generate_poll_results(poll):
     """Generate poll results with vote counts and percentages."""
     options_data = []
     total_votes = poll.total_votes
-    
+
     for option in poll.options.all():
         percentage = (option.vote_count / total_votes * 100) if total_votes > 0 else 0
         options_data.append({
@@ -279,7 +339,7 @@ def generate_poll_results(poll):
             'vote_count': option.vote_count,
             'percentage': round(percentage, 2)
         })
-    
+
     return {
         'poll_id': str(poll.id),
         'poll_title': poll.title,
@@ -321,7 +381,7 @@ def user_polls(request):
 def user_votes(request):
     """Get votes cast by the authenticated user."""
     votes = Vote.objects.filter(voter=request.user).select_related('poll', 'option')
-    
+
     votes_data = []
     for vote in votes:
         votes_data.append({
@@ -331,7 +391,7 @@ def user_votes(request):
             'option_text': vote.option.text,
             'created_at': vote.created_at.isoformat()
         })
-    
+
     return Response(votes_data)
 
 
@@ -351,6 +411,48 @@ def user_profile(request):
     return Response(serializer.data)
 
 
+@extend_schema(
+    summary="Test authentication",
+    description="Test endpoint to verify authentication is working.",
+    responses={
+        200: {"description": "Authentication successful"},
+        401: {"description": "Authentication failed"},
+    }
+)
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def test_auth(request):
+    """Test endpoint to verify authentication is working."""
+    return Response({
+        'message': 'Authentication successful',
+        'user_id': request.user.id,
+        'username': request.user.username,
+        'is_authenticated': request.user.is_authenticated
+    })
+
+
+@extend_schema(
+    summary="Debug authentication",
+    description="Debug endpoint to check authentication details.",
+    responses={
+        200: {"description": "Debug information"},
+    }
+)
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def debug_auth(request):
+    """Debug endpoint to check authentication details."""
+    auth_header = request.META.get('HTTP_AUTHORIZATION', '')
+    return Response({
+        'auth_header': auth_header,
+        'user': str(request.user) if hasattr(request, 'user') else 'No user',
+        'is_authenticated': request.user.is_authenticated if hasattr(request, 'user') else False,
+        'user_id': request.user.id if hasattr(request, 'user') and request.user.is_authenticated else None,
+        'username': request.user.username if hasattr(request, 'user') and request.user.is_authenticated else None,
+        'all_headers': dict(request.META)
+    })
+
+
 # Celery task for async result updates
 from celery import shared_task
 
@@ -359,15 +461,82 @@ def update_poll_results_async(poll_id):
     """Update poll results asynchronously."""
     try:
         poll = Poll.objects.get(id=poll_id)
-        
+
         # Update cached results
         cache_key = f"poll_results_{poll_id}"
         results = generate_poll_results(poll)
         cache.set(cache_key, results, timeout=300)
-        
+
         # Update or create PollResult record
         poll_result, created = PollResult.objects.get_or_create(poll=poll)
         poll_result.update_results()
-        
+
     except Poll.DoesNotExist:
         pass
+
+
+@extend_schema(
+    summary="Register user",
+    description="Create a new user account and return authentication token.",
+    request=UserRegistrationSerializer,
+    responses={
+        201: TokenSerializer,
+        400: {"description": "Validation error"},
+    }
+)
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def register_user(request):
+    """Register a new user and return authentication token."""
+    serializer = UserRegistrationSerializer(data=request.data)
+
+    if serializer.is_valid():
+        user = serializer.save()
+        token, created = Token.objects.get_or_create(user=user)
+        token_serializer = TokenSerializer(token)
+        return Response(token_serializer.data, status=status.HTTP_201_CREATED)
+
+    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+@extend_schema(
+    summary="Login user",
+    description="Authenticate user and return authentication token.",
+    request=UserLoginSerializer,
+    responses={
+        200: TokenSerializer,
+        400: {"description": "Invalid credentials"},
+    }
+)
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def login_user(request):
+    """Authenticate user and return authentication token."""
+    serializer = UserLoginSerializer(data=request.data)
+
+    if serializer.is_valid():
+        user = serializer.validated_data['user']
+        token, created = Token.objects.get_or_create(user=user)
+        token_serializer = TokenSerializer(token)
+        return Response(token_serializer.data, status=status.HTTP_200_OK)
+
+    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+@extend_schema(
+    summary="Logout user",
+    description="Delete user's authentication token.",
+    responses={
+        200: {"description": "Successfully logged out"},
+        401: {"description": "Authentication required"},
+    }
+)
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def logout_user(request):
+    """Logout user by deleting their authentication token."""
+    try:
+        request.user.auth_token.delete()
+        return Response({'message': 'Successfully logged out'}, status=status.HTTP_200_OK)
+    except:
+        return Response({'error': 'Token not found'}, status=status.HTTP_400_BAD_REQUEST)
